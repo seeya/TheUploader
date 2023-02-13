@@ -1,0 +1,11 @@
+/target
+db.sqlite
+db.sqlite-shm
+db.sqlite-wal
+td.binlog
+logs.txt
+files/
+.DS_Store
+.env
+.cargo
+backup

@@ -1,5 +1,13 @@
 # Building TDLIB
 
+As telegram bot has a max file upload size of `50MB`, we can use `tdlib` as a normal user to upload files which increases the limit to `2GB` and `4GB` for premium users.
+
+In order for this to work, we will have a normal telegram bot and a normal user account.
+The user account is responsible for uploading the files and forwarding the file to the Bot.
+Once the Bot receive the file, it can forward to the user who requested the file.
+
+### OSX
+
 ```
 xcode-select --install
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -10,7 +18,25 @@ rm -rf build
 mkdir build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl/ -DCMAKE_INSTALL_PREFIX:PATH=/usr/local -DTD_ENABLE_LTO=ON ..
-cmake --build . --target install
+sudo cmake --build . --target install
+cd ..
+cd ..
+ls -l /usr/local
+```
+
+### RPI4
+
+```
+sudo apt-get update
+sudo apt-get upgrade
+sudo apt-get install make git zlib1g-dev libssl-dev gperf php5-cli cmake3 clang-3.9 libc++-dev
+git clone https://github.com/tdlib/td.git
+cd td
+rm -rf build
+mkdir build
+cd build
+CXXFLAGS="-stdlib=libc++" CC=/usr/bin/clang-3.9 CXX=/usr/bin/clang++-3.9 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX:PATH=/usr/local ..
+sudo cmake --build . --target install
 cd ..
 cd ..
 ls -l /usr/local
@@ -24,41 +50,55 @@ In order to upload larger file size, the Bots api cannot be used. Hence `tdlib` 
 
 # Torrent Client
 
-When a magnet link is received, the magnet link will be posted to `TORRENT_API` defined in the `.env` file. This is to automatically start a download and once complete run a script to copy the files to the `WATCH_PATH` folder to start the upload to the `SEND_TO` chat.
-
-The torrent client tested with can be found here https://github.com/boypt/simple-torrent
-
-### Torrent Client Config
-
-Note that the torrent client reads its config from `cloud-torrent.yaml`.
-Update the keys `donecmd`, `downloaddirectory`, `watchdirectory` as well as the `doneCMD.sh`'s `RESTAPI` and `JOBPATH` to what you've set.
+I'm using qBittorent on a RPI4 and it works well.
+You can find the latest binary here. https://github.com/userdocs/qbittorrent-nox-static
 
 ```
-allowruntimeconfigure: true
-autostart: true
-disableutp: false
-donecmd: "/home/pi/Torrents/scripts/doneCMD.sh"
-downloaddirectory: "/home/pi/Torrents/downloaded"
-enableseeding: true
-enableupload: true
-incomingport: 50007
-maxconcurrenttask: 0
-nodefaultportforwarding: true
-obfspreferred: true
-obfsrequirepreferred: false
-proxyurl: ""
-seedratio: 0
-seedtime: "0"
-watchdirectory: "/home/pi/Torrents/pending"
+wget https://github.com/userdocs/qbittorrent-nox-static/releases/download/release-4.5.4_v2.0.9/aarch64-qbittorrent-nox
+mv aarch64-qbittorrent-nox /usr/bin/qbittorrent-nox
+chmod +x /usr/bin/qbittorrent-nox
 ```
+
+Set the qBittorrent as a service `/etc/systemd/system/qbittorrent.service`.
+
+```
+[Unit]
+Description=qBittorrent
+After=network.target
+
+[Service]
+Type=forking
+User=pi
+Group=pi
+UMask=002
+ExecStart=/usr/bin/qbittorrent-nox -d --webui-port=8080
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then we start the service, you should be able to access the webui at the machine's port :8080.
+The default login credentials are `admin:adminadmin`
+
+```bash
+sudo systemctl start qbittorrent
+```
+
+# MongoDB
+
+I'm using MongoDB Atlas as a database to store all files metadata which has been uploaded.
+This is to prevent reuploading the files and just forward it using the `file_id`.
 
 # .env file
 
 ```
-WATCH_PATH=/home/pi/jobs
-UPLOADING_PATH=/home/pi/uploading
-SEND_TO=telegram_chat_id
+TELEGRAM_TOKEN=
+TORRENT_JOB_FOLDER=/home/pi/torrent/job
+TORRENT_DONE_PATH=/home/pi/torrent/upload
+MONGO_URI=
+ADMIN_ID=
 API_ID=
 API_HASH=
-TORRENT_API=http://localhost:3000
+SEND_TO=
 ```

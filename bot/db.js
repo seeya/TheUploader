@@ -55,6 +55,20 @@ async function saveTorrent({ initiator, hash }) {
     });
 }
 
+async function setIsUploading(hash, name) {
+  return await client
+    .db("db")
+    .collection("torrents")
+    .updateOne(
+      { hash, "files.name": name },
+      {
+        $set: {
+          "files.$.status": "uploading",
+        },
+      }
+    );
+}
+
 async function updateTorrent(hash, payload) {
   let ok = await client.db("db").collection("torrents").updateOne({ hash }, { $set: payload });
   console.log(ok);
@@ -72,7 +86,7 @@ async function findIncompleteUploads() {
   return await client
     .db("db")
     .collection("torrents")
-    .find({ status: "upload", "files.file_id": null })
+    .find({ status: "upload", "files.file_id": null, "files.status": null })
     .limit(1)
     .toArray();
 }
@@ -85,5 +99,6 @@ module.exports = {
   addFileToTorrent,
   findTorrent,
   torrent,
+  setIsUploading,
   findIncompleteUploads,
 };

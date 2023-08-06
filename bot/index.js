@@ -9,6 +9,7 @@ const {
   updateTorrent,
   findTorrent,
   addFileToTorrent,
+  setIsUploading,
   torrent,
   saveRequest,
   findIncompleteUploads,
@@ -154,6 +155,8 @@ http
                   entities: null,
                 },
               });
+
+              await setIsUploading(hash, file.name);
             } catch (err) {
               console.log("failed to upload", err);
             }
@@ -271,6 +274,7 @@ async function fileHandler(msg) {
         "files.$.file_unique_id": file_unique_id,
         "files.$.mime_type": mime_type,
         "files.$.file_size": file_size,
+        "files.$.status": "success",
       },
     }
   );

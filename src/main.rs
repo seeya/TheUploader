@@ -1,117 +1,41 @@
+use clap::{arg, Parser};
 use dotenv::dotenv;
-use lazy_static::lazy_static;
-use regex::Regex;
-use std::io;
 use std::path::Path;
-use std::time::Duration;
-use tdlib::enums::{AuthorizationState, Update};
-use tdlib::functions::{self};
-use tokio::time::sleep;
+use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tdlib::enums::{AuthorizationState, Document, FormattedText, Message, MessageContent, Update};
+use tdlib::functions::{self, get_top_chats};
+use tdlib::types::{InputFileRemote, MessageDocument};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
-async fn handle_login(update: AuthorizationState, client_id: i32) {
-    match update {
-        AuthorizationState::WaitTdlibParameters => {
-            println!("Waiting for TDLib parameters ");
-
-            let api_id = std::env::var("API_ID").expect("WATCH_PATH must be set.");
-            let api_id = api_id.parse::<i32>().unwrap();
-            let api_hash = std::env::var("API_HASH").expect("UPLOADING_PATH must be set.");
-
-            tokio::spawn(async move {
-                let result = functions::set_tdlib_parameters(
-                    false,
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    true,
-                    true,
-                    true,
-                    true,
-                    api_id,
-                    api_hash.to_string(),
-                    "en-US".to_owned(),
-                    "Desktop".into(),
-                    String::new(),
-                    "1.0".to_owned(),
-                    true,
-                    false,
-                    client_id,
-                )
-                .await;
-
-                if result.is_ok() {
-                    println!("TDLib parameters set");
-                } else {
-                    println!("Error setting TDLib parameters {:?}", result);
-                }
-            });
-        }
-        AuthorizationState::WaitPhoneNumber => {
-            tokio::spawn(async move {
-                println!("Enter phone number: ");
-                let mut mobile = "".to_string();
-                io::stdin().read_line(&mut mobile).unwrap();
-                let result =
-                    functions::set_authentication_phone_number(mobile.to_owned(), None, client_id)
-                        .await;
-
-                if result.is_ok() {
-                    println!("Login Code sent");
-                } else {
-                    println!("Error setting phone number");
-                }
-            });
-        }
-        AuthorizationState::WaitCode(_) => {
-            let mut code = "".to_string();
-            print!("Enter authentication code: ");
-            io::stdin().read_line(&mut code).unwrap();
-
-            tokio::spawn(async move {
-                let r = functions::check_authentication_code(code, client_id).await;
-
-                if r.is_ok() {
-                    println!("Code OK");
-                } else {
-                    println!("Error Code");
-                }
-            });
-        }
-        AuthorizationState::WaitPassword(_) => {
-            let mut password = "".to_string();
-            print!("Enter password: ");
-            io::stdin().read_line(&mut password).unwrap();
-
-            tokio::spawn(async move {
-                let r = functions::check_authentication_password(password, client_id).await;
-
-                if r.is_ok() {
-                    println!("Password Ok");
-                } else {
-                    println!("Error Password");
-                }
-            });
-        }
-        AuthorizationState::Ready => {
-            spawn_watcher(client_id);
-        }
-        update => {
-            println!("Authorized state: {:?}", update);
-        }
-    }
-}
-
-async fn send_file(chat_id: i64, path: String, client_id: i32) {
+async fn send_file(
+    chat_id: i64,
+    path: String,
+    caption: Option<String>,
+    client_id: i32,
+) -> Result<tdlib::enums::Message, tdlib::types::Error> {
     println!("Sending File {:#?} to: {:}", path, chat_id);
+
+    let mut formatted_caption: Option<tdlib::types::FormattedText> = None;
+
+    if caption.is_some() {
+        formatted_caption = Some(tdlib::types::FormattedText {
+            text: caption.unwrap(),
+            entities: vec![],
+        });
+    }
 
     let document = tdlib::types::InputMessageDocument {
         document: tdlib::enums::InputFile::Local(tdlib::types::InputFileLocal { path }),
         thumbnail: None,
         disable_content_type_detection: false,
-        caption: None,
+        caption: formatted_caption,
     };
 
-    let _ = functions::send_message(
+    functions::send_message(
         chat_id,
         0,
         0,
@@ -119,95 +43,144 @@ async fn send_file(chat_id: i64, path: String, client_id: i32) {
         tdlib::enums::InputMessageContent::InputMessageDocument(document),
         client_id,
     )
-    .await;
+    .await
 }
 
-fn is_uploading(uploading_path: String) -> bool {
-    let uploading_count = std::fs::read_dir(uploading_path).unwrap().count();
+fn download_youtube_video(chat_id: i64, link: String, client_id: i32) {
+    let video_name = format!("{}.mp4", "test");
+    let video_path = format!("./{}", video_name);
 
-    println!("Total files in uploading folder {:}", uploading_count);
-    let max_concurrent_uploads = 1;
-    return uploading_count >= max_concurrent_uploads;
+    let mut cmd = Command::new("yt-dlp");
+    cmd.arg("-f")
+        .arg("bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4");
+    cmd.arg("-o").arg(&video_path);
+    cmd.arg(&link);
+
+    let output = cmd.output().expect("Failed to execute command");
+    if !output.status.success() {
+        println!("Failed to download video: {:?}", output);
+        return;
+    }
+
+    // tokio::spawn(async move {
+    //     send_file(chat_id, video_path, client_id).await;
+    // });
 }
 
-fn spawn_watcher(client_id: i32) {
-    tokio::spawn(async move {
-        let watch_path = std::env::var("WATCH_PATH").expect("WATCH_PATH must be set.");
-        let uploading_path = std::env::var("UPLOADING_PATH").expect("UPLOADING_PATH must be set.");
-        let send_to = std::env::var("SEND_TO").expect("SEND_TO must be set.");
-        let send_to = send_to.parse::<i64>().unwrap();
+fn ask_user(string: &str) -> String {
+    println!("{}", string);
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    input.trim().to_string()
+}
 
-        loop {
-            println!("Checking for new files...");
-
-            // Check if uploading_path contains more than 1 file
-
-            for entry in std::fs::read_dir(watch_path.clone()).unwrap() {
-                if is_uploading(uploading_path.clone()) {
-                    continue;
-                }
-
-                let entry = entry.unwrap();
-                let path = entry.path();
-                if path.is_dir() {
-                    println!("{:?} is a dir", path);
+async fn handle_update(update: Update, auth_tx: &Sender<AuthorizationState>) {
+    match update {
+        Update::AuthorizationState(update) => {
+            auth_tx.send(update.authorization_state).await.unwrap();
+        }
+        Update::File(data) => {
+            if data.file.remote.id != "" {
+                let r = auth_tx.send(AuthorizationState::Closed).await;
+                if r.is_err() {
+                    println!("Error sending authorization state {:#}", r.err().unwrap());
                 } else {
-                    if path.to_str().unwrap().contains(".DS_Store") {
-                        continue;
-                    }
-
-                    let file_name = path
-                        .as_path()
-                        .display()
-                        .to_string()
-                        .split("/")
-                        .last()
-                        .unwrap()
-                        .to_string();
-
-                    let upload_path = format!("{}/{}", uploading_path, file_name);
-                    let _ = std::fs::rename(path.to_str().unwrap(), upload_path.clone());
-
-                    send_file(send_to, upload_path, client_id).await;
+                    println!("File sent!")
                 }
             }
-
-            sleep(Duration::from_secs(10)).await;
         }
-    });
+        _ => (),
+    }
 }
 
-fn start_magnet(chat_id: i64, magnet: String, client_id: i32) {
-    println!("Starting magnet: {:}", magnet);
-    let torrent_api = std::env::var("TORRENT_API").expect("TORRENT_API must be set.");
+async fn handle_authorization_state(
+    client_id: i32,
+    mut auth_rx: Receiver<AuthorizationState>,
+    run_flag: Arc<AtomicBool>,
+) -> Receiver<AuthorizationState> {
+    while let Some(state) = auth_rx.recv().await {
+        match state {
+            AuthorizationState::WaitTdlibParameters => {
+                let api_id = std::env::var("API_ID").expect("WATCH_PATH must be set.");
+                let api_id = api_id.parse::<i32>().unwrap();
+                let api_hash = std::env::var("API_HASH").expect("UPLOADING_PATH must be set.");
 
-    tokio::spawn(async move {
-        // Send the magnet to an api over post
-        let client = reqwest::Client::new();
-        let res = client.post(torrent_api).body(magnet).send().await;
+                let response = functions::set_tdlib_parameters(
+                    false,
+                    "get_me_db".into(),
+                    String::new(),
+                    String::new(),
+                    true,
+                    true,
+                    true,
+                    false,
+                    api_id,
+                    api_hash,
+                    "en".into(),
+                    "Desktop".into(),
+                    String::new(),
+                    env!("CARGO_PKG_VERSION").into(),
+                    false,
+                    true,
+                    client_id,
+                )
+                .await;
 
-        let mut response = "I see a 🧲! Will start downloading now!";
-        if res.is_err() {
-            response = "Failed to add magnet!";
-            println!("Failed to add magnet {:#?}", res);
+                if let Err(error) = response {
+                    println!("{}", error.message);
+                }
+            }
+            AuthorizationState::WaitPhoneNumber => loop {
+                let input = ask_user("Enter your phone number (include the country calling code):");
+                let response =
+                    functions::set_authentication_phone_number(input, None, client_id).await;
+                match response {
+                    Ok(_) => break,
+                    Err(e) => println!("{}", e.message),
+                }
+            },
+            AuthorizationState::WaitCode(_) => loop {
+                let input = ask_user("Enter the verification code:");
+                let response = functions::check_authentication_code(input, client_id).await;
+                match response {
+                    Ok(_) => break,
+                    Err(e) => println!("{}", e.message),
+                }
+            },
+            AuthorizationState::Ready => {
+                println!("READY!");
+                break;
+            }
+            AuthorizationState::Closed => {
+                // Set the flag to false to stop receiving updates from the
+                // spawned task
+                run_flag.store(false, Ordering::Release);
+                break;
+            }
+            AuthorizationState::WaitPassword(_) => loop {
+                let input = ask_user("Enter your 2FA Password:");
+                let response = functions::check_authentication_password(input, client_id).await;
+                match response {
+                    Ok(_) => break,
+                    Err(e) => println!("{}", e.message),
+                }
+            },
+            state => {
+                println!("Unexpected authorization state: {:?}", state);
+            }
         }
-        let _ = functions::send_message(
-            chat_id,
-            0,
-            0,
-            None,
-            tdlib::enums::InputMessageContent::InputMessageText(tdlib::types::InputMessageText {
-                text: tdlib::types::FormattedText {
-                    text: response.to_string(),
-                    entities: vec![],
-                },
-                disable_web_page_preview: true,
-                clear_draft: false,
-            }),
-            client_id,
-        )
-        .await;
-    });
+    }
+
+    auth_rx
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    hash: String,
+    #[arg(short, long)]
+    path: String,
 }
 
 #[tokio::main]
@@ -215,77 +188,57 @@ async fn main() {
     dotenv().ok();
     println!("The Uploader Started!");
 
-    // Create an instance of the TDLib client
-    println!("Creating TDLib client...");
+    let args = Args::parse();
     let client_id = tdlib::create_client();
 
-    tokio::spawn(async move {
-        println!("Setting log verbosity level...");
-        let _ = functions::set_log_verbosity_level(0, client_id).await;
-    });
+    let (auth_tx, auth_rx) = mpsc::channel(5);
+    // let (action_tx, mut action_rx) = mpsc::channel(5);
 
-    loop {
-        if let Some((update, client_id)) = tdlib::receive() {
-            // println!("Received update: {:?}", update);
+    let run_flag = Arc::new(AtomicBool::new(true));
+    let run_flag_clone = run_flag.clone();
 
-            match update {
-                Update::AuthorizationState(update) => {
-                    handle_login(update.authorization_state, client_id).await;
-                }
-                Update::NewMessage(data) => match data.message.content {
-                    tdlib::enums::MessageContent::MessageText(message_text) => {
-                        let message = message_text.text.text;
-                        println!("New message {:#?}", message);
-
-                        lazy_static! {
-                            static ref RE: Regex =
-                                Regex::new(r"magnet:\?xt=urn:[a-z0-9]+:[a-zA-Z0-9&=.%-]{32,}")
-                                    .unwrap();
-                        }
-
-                        for cap in RE.captures_iter(&message) {
-                            println!("Magnet Found\n{}", &cap[0]);
-                            start_magnet(data.message.chat_id, cap[0].to_string(), client_id);
-                        }
-                    }
-                    tdlib::enums::MessageContent::MessageDocument(_) => {
-                        // println!("New document message {:#?}", message_document);
-                    }
-                    _ => {}
-                },
-                Update::MessageSendSucceeded(data) => match data.message.content {
-                    tdlib::enums::MessageContent::MessageDocument(message_document) => {
-                        let path = message_document.document.document.local.path;
-                        if Path::new(&path).exists() {
-                            std::fs::remove_file(path).unwrap();
-                        }
-                    }
-                    _ => {}
-                },
-                Update::File(data) => {
-                    let uploaded_size = data.file.remote.uploaded_size;
-                    let file_name = data.file.local.path.clone();
-                    if data.file.expected_size == uploaded_size {
-                        if Path::new(&file_name).exists() {
-                            std::fs::remove_file(file_name.clone()).unwrap();
-                        }
-
-                        println!("{:} uploaded 100%", file_name.split("/").last().unwrap());
-                    } else {
-                        let percentage: f64 =
-                            uploaded_size as f64 / data.file.expected_size as f64 * 100.0;
-
-                        println!(
-                            "{:} uploaded {:.2}%",
-                            file_name.split("/").last().unwrap(),
-                            percentage
-                        );
-                    }
-                }
-                update => {
-                    // println!("UNHANDLED Update: {:#?}", update);
-                }
+    let handle = tokio::spawn(async move {
+        while run_flag_clone.load(Ordering::Acquire) {
+            if let Some((update, _client_id)) = tdlib::receive() {
+                handle_update(update, &auth_tx).await;
             }
         }
+    });
+
+    functions::set_log_verbosity_level(0, client_id)
+        .await
+        .unwrap();
+
+    // tokio::spawn(async move {
+    //     println!("Waiting for file to be sent!");
+    //     while let Some(state) = action_rx.recv().await {
+    //         println!("Received file sent notification! {:}", state);
+    //         functions::close(client_id).await.unwrap();
+    //     }
+
+    //     println!("Ended!!!")
+    // });
+
+    let auth_rx = handle_authorization_state(client_id, auth_rx, run_flag.clone()).await;
+
+    let r = functions::get_chats(None, 100, client_id).await;
+
+    if r.is_err() {
+        println!("Error: {:?}", r);
+    } else {
+        let send_to = std::env::var("SEND_TO").expect("SEND_TO must be set.");
+        let send_to = send_to.parse::<i64>().unwrap();
+        let file = send_file(send_to, args.path, Some(args.hash), client_id).await;
+
+        if file.is_err() {
+            println!("Failed to send file {:#?}", file.err())
+        } else {
+            println!("File is uploading");
+        }
     }
+
+    println!("ASdfasf");
+
+    handle_authorization_state(client_id, auth_rx, run_flag.clone()).await;
+    handle.await.unwrap();
 }

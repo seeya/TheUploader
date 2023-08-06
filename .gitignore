@@ -9,3 +9,4 @@ files/
 .env
 .cargo
 backup
+node_modules

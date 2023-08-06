@@ -1,3 +1,21 @@
+# Building TDLIB
+
+```
+xcode-select --install
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install gperf cmake openssl
+git clone https://github.com/tdlib/td.git
+cd td
+rm -rf build
+mkdir build
+cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl/ -DCMAKE_INSTALL_PREFIX:PATH=/usr/local -DTD_ENABLE_LTO=ON ..
+cmake --build . --target install
+cd ..
+cd ..
+ls -l /usr/local
+```
+
 # Introduction
 
 The idea of this project is to automatically upload files in a folder to a telegram chat. One use case could be auto-upload torrent files once it is completed.

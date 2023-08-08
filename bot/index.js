@@ -72,11 +72,13 @@ http
               const stats = fs.statSync(fullPath);
               if (stats.size > 1000 && stats.size < 4e9) {
                 console.log(fileName, stats.size);
-                files.push({
-                  name: fileName,
-                  file_id: null,
-                  size: stats.size,
-                });
+                if (!stats.isDirectory()) {
+                  files.push({
+                    name: fileName,
+                    file_id: null,
+                    size: stats.size,
+                  });
+                }
               } else {
               }
             });

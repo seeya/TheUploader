@@ -85,6 +85,14 @@ The default login credentials are `admin:adminadmin`
 sudo systemctl start qbittorrent
 ```
 
+In the settings, add this command under "Downloads > Run external program on torrent finished"
+This will notify our server to mark the file as ready for upload. Then our uploader will pick it up
+in the next iteration and start the uploading.
+
+```
+curl http://localhost:3000/job/%K -d '"%F"'
+```
+
 # MongoDB
 
 I'm using MongoDB Atlas as a database to store all files metadata which has been uploaded.
